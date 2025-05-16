@@ -6,11 +6,12 @@
 local i = require 'inspect'
 local aws_auth = require 'resty.aws_auth'
 local http     = require 'resty.http'
-local xml      = require 'xml'
 local cjson     = require 'cjson'
 local email_from = ''
+local reply_to = nil
+local return_path = nil
 local config = {
-  aws_service  = 'ses',  
+  aws_service  = 'ses',
   aws_key      = nil,
   aws_secret   = nil,
   aws_region   = nil,
@@ -31,6 +32,8 @@ function _M:new(c)
   if not c.aws_key then return error('Missing required aws_key') end
   if not c.email_from then return error('Need to specify email_from') end
   email_from = c.email_from
+  reply_to = c.reply_to
+  return_path = c.return_path
   config.aws_secret = c.aws_secret
   config.aws_region = c.aws_region
   config.aws_key  = c.aws_key
@@ -49,19 +52,20 @@ function _M.request()
     headers = {
       ['Content-Type'] = 'application/x-www-form-urlencoded', -- required
       ['Authorization'] = aws:get_authorization_header(),
+      ['Accept'] = 'application/json',
       ['X-Amz-Date'] = aws:get_date_header()
     }
-  }) 
+  })
 
   if not res then return nil, err end
-  local body = xml.load(res.body)
-  if body.xml == 'SendEmailResponse' then
-    return body[1][1][1]  -- success 
-  elseif body.xml == 'SendTemplatedEmailResponse' then
-    return body[1][1][1]  -- success 
-  else
-    return nil, body[1][3][1] -- failed
+  if not res.status == 200 then return nil, res.body end
+  local body = cjson.decode(res.body)
+  if body["SendTemplatedEmailResponse"] then
+      return body["SendTemplatedEmailResponse"]["SendTemplatedEmailResult"]["MessageId"]
+  elseif body["SendEmailResponse"] then
+      return body["SendEmailResponse"]["SendEmailResult"]["MessageId"]
   end
+  return nil
 end
 
 -- send templated email
@@ -80,13 +84,19 @@ function _M.send_templated(self, email_to, template, data)
 
   self.set_template(template, data)
   self.set_destination(email_to)
+  if reply_to then
+    self.set_reply_to(reply_to)
+  end
+  if return_path then
+    self.set_return_path(return_path)
+  end
   return self.request()
 end
 
 -- send email
--- @param email_to string or array recipient email eg hello<hello@world.com> 
+-- @param email_to string or array recipient email eg hello<hello@world.com>
 --        for multiple email eg {"hello<hello@world.com>", "sumandak<sumandak@tamparuli.com>" }
--- @return res, err 
+-- @return res, err
 function _M.send(self, email_to, subject, message)
   if not subject then return nil, 'Missing required email subject' end
   if not message then return nil, 'Missing required email message' end
@@ -100,6 +110,12 @@ function _M.send(self, email_to, subject, message)
 
   self.set_destination(email_to)
   self.set_message(message)
+  if reply_to then
+    self.set_reply_to(reply_to)
+  end
+  if return_path then
+    self.set_return_path(return_path)
+  end
   return self.request()
 end
 
@@ -133,6 +149,20 @@ function _M.set_template(template, data)
   else
     config.request_body['TemplateData'] = tostring(data)
   end
+end
+
+function _M.set_reply_to(email)
+  if type(email) == 'table' then
+    for k, v in ipairs(email) do
+      config.request_body['ReplyToAddresses.member.' .. k] = tostring(v)
+    end
+  else
+    config.request_body['ReplyToAddresses.member.1'] = tostring(email)
+  end
+end
+
+function _M.set_return_path(email)
+  config.request_body['ReturnPath'] = tostring(email)
 end
 
 function _M.is_valid_email(email)
@@ -193,11 +223,11 @@ function _M.is_valid_email(email)
 end
 
 function _M.is_valid_destination(self, email)
-  if not email then return false end 
+  if not email then return false end
   if type(email) == 'string' then return self.is_valid_email(email) end
-  for k, v in pairs(email) do 
-    if not self.is_email(v) then return false end 
-  end 
+  for k, v in pairs(email) do
+    if not self.is_email(v) then return false end
+  end
   return true
 end
 
